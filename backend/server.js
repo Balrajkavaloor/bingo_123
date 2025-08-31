@@ -73,8 +73,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 const connectDB = async () => {
   try {
     const conn = await mongoose.connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
+      // Removed deprecated options
     });
     console.log(`MongoDB Connected: ${conn.connection.host}`);
   } catch (error) {
@@ -103,6 +102,12 @@ app.use('/api/users', authenticateToken, userRoutes);
 app.use('/api/games', authenticateToken, gameRoutes);
 app.use('/api/scores', authenticateToken, scoreRoutes);
 app.use('/api/admin', authenticateToken, adminRoutes);
+
+// Add Socket.IO to request object for routes
+app.use((req, res, next) => {
+  req.io = io;
+  next();
+});
 
 // Socket.IO connection handling
 handleSocketConnection(io);

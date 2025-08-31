@@ -97,7 +97,6 @@ const gameSchema = new mongoose.Schema({
 });
 
 // Indexes for better performance
-gameSchema.index({ creator: 1, opponent: 1, status: 1 });
 gameSchema.index({ status: 1 });
 gameSchema.index({ createdAt: -1 });
 gameSchema.index({ 'gameData.currentTurn': 1 });

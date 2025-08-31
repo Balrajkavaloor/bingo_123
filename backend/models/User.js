@@ -8,7 +8,7 @@ const userSchema = new mongoose.Schema({
     unique: true,
     lowercase: true,
     trim: true,
-    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
+    match: [/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/, 'Please enter a valid email address']
   },
   password: {
     type: String,
@@ -20,7 +20,7 @@ const userSchema = new mongoose.Schema({
     required: [true, 'Username is required'],
     unique: true,
     trim: true,
-    minlength: [3, 'Username cannot exceed 20 characters'],
+    minlength: [3, 'Username must be at least 3 characters long'],
     maxlength: [20, 'Username cannot exceed 20 characters']
   },
   avatar: {
@@ -116,6 +116,28 @@ userSchema.index({ isActive: 1 });
 
 // Hash password before saving
 userSchema.pre('save', async function(next) {
+  // CRITICAL SECURITY CHECK: Ensure this is a new user with proper validation
+  if (this.isNew) {
+    console.log('Creating new user:', { email: this.email, username: this.username });
+    
+    // Ensure required fields are present
+    if (!this.email || !this.password || !this.username) {
+      return next(new Error('Missing required fields for user creation'));
+    }
+    
+    // Ensure email is valid
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(this.email)) {
+      return next(new Error('Invalid email format'));
+    }
+    
+    // Ensure username is valid
+    const usernameRegex = /^[a-zA-Z0-9_-]{3,20}$/;
+    if (!usernameRegex.test(this.username)) {
+      return next(new Error('Invalid username format'));
+    }
+  }
+  
   if (!this.isModified('password')) return next();
   
   try {

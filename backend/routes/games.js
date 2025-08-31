@@ -329,6 +329,34 @@ router.post('/:gameId/call-number', async (req, res) => {
 
       await creatorScore.save();
       await opponentScore.save();
+
+      // Emit real-time game completion event
+      if (req.io) {
+        req.io.emit('gameCompleted', {
+          gameId: game._id,
+          winner: winner.toString(),
+          creatorStats: {
+            userId: creatorUser._id,
+            gamesPlayed: creatorUser.gamesPlayed,
+            gamesWon: creatorUser.gamesWon,
+            gamesLost: creatorUser.gamesLost,
+            totalLinesCompleted: creatorUser.totalLinesCompleted,
+            averageLinesPerGame: creatorUser.averageLinesPerGame,
+            achievementLevel: creatorUser.achievementLevel,
+            winRate: creatorUser.winRate
+          },
+          opponentStats: {
+            userId: opponentUser._id,
+            gamesPlayed: opponentUser.gamesPlayed,
+            gamesWon: opponentUser.gamesWon,
+            gamesLost: opponentUser.gamesLost,
+            totalLinesCompleted: opponentUser.totalLinesCompleted,
+            averageLinesPerGame: opponentUser.averageLinesPerGame,
+            achievementLevel: opponentUser.achievementLevel,
+            winRate: opponentUser.winRate
+          }
+        });
+      }
     }
 
     await game.save();

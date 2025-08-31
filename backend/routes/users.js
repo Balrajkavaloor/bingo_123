@@ -167,6 +167,29 @@ router.get('/:userId/stats', async (req, res) => {
   }
 });
 
+// Get current user stats
+router.get('/stats', async (req, res) => {
+  try {
+    const user = await User.findById(req.user._id)
+      .select('gamesPlayed gamesWon gamesLost totalLinesCompleted averageLinesPerGame achievementLevel winRate')
+      .lean();
+
+    if (!user) {
+      return res.status(404).json({
+        error: 'User not found'
+      });
+    }
+
+    res.json(user);
+
+  } catch (error) {
+    console.error('Get current user stats error:', error);
+    res.status(500).json({
+      error: 'Internal server error'
+    });
+  }
+});
+
 // Search users
 router.get('/search/:query', async (req, res) => {
   try {

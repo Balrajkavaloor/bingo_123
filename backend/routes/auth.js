@@ -34,15 +34,25 @@ router.post('/register', authLimiter, async (req, res) => {
       });
     }
 
-    if (password.length < 6) {
+    // Enhanced email validation
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(email)) {
       return res.status(400).json({
-        error: 'Password must be at least 6 characters long'
+        error: 'Please enter a valid email address'
       });
     }
 
-    if (username.length < 3) {
+    // Enhanced username validation
+    const usernameRegex = /^[a-zA-Z0-9_-]{3,20}$/;
+    if (!usernameRegex.test(username)) {
       return res.status(400).json({
-        error: 'Username must be at least 3 characters long'
+        error: 'Username must be 3-20 characters long and contain only letters, numbers, underscores, and hyphens'
+      });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        error: 'Password must be at least 6 characters long'
       });
     }
 
@@ -105,6 +115,15 @@ router.post('/register', authLimiter, async (req, res) => {
   } catch (error) {
     console.error('Registration error:', error);
     
+    // Handle Mongoose validation errors
+    if (error.name === 'ValidationError') {
+      const validationErrors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        error: 'Validation failed',
+        details: validationErrors
+      });
+    }
+    
     if (error.code === 11000) {
       const field = Object.keys(error.keyPattern)[0];
       return res.status(400).json({
@@ -118,10 +137,20 @@ router.post('/register', authLimiter, async (req, res) => {
   }
 });
 
-// Login user
+// Login user - CRITICAL: This route should NEVER create users, only authenticate existing ones
 router.post('/login', loginLimiter, async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, username, ...otherFields } = req.body;
+
+    // SECURITY CHECK: Prevent any registration-like data in login
+    if (username || Object.keys(otherFields).length > 0) {
+      console.error('SECURITY ALERT: Login route received registration data:', { username, otherFields });
+      return res.status(400).json({
+        error: 'Invalid request. This endpoint is for login only.'
+      });
+    }
+
+    console.log('Login attempt:', { email: email?.substring(0, 10) + '...', hasPassword: !!password });
 
     // Validation
     if (!email || !password) {
@@ -130,14 +159,33 @@ router.post('/login', loginLimiter, async (req, res) => {
       });
     }
 
-    // Find user by email
+    // Enhanced email validation for login
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({
+        error: 'Please enter a valid email address'
+      });
+    }
+
+    // Find user by email (case-insensitive) - ONLY EXISTING USERS
     const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
+      console.log('Login failed: User not found for email:', email);
       return res.status(401).json({
         error: 'Invalid email or password'
       });
     }
+
+    // CRITICAL SECURITY CHECK: Ensure this is an existing user, not a new one
+    if (user.isNew || !user._id) {
+      console.error('SECURITY ALERT: Found invalid user object in login:', user);
+      return res.status(500).json({
+        error: 'Account security issue. Please contact support.'
+      });
+    }
+
+    console.log('User found:', { userId: user._id, username: user.username, hasPassword: !!user.password });
 
     // Check if account is active
     if (!user.isActive) {
@@ -146,14 +194,25 @@ router.post('/login', loginLimiter, async (req, res) => {
       });
     }
 
+    // Verify password exists and is hashed
+    if (!user.password || user.password.length < 10) {
+      console.error('User has invalid password hash:', { userId: user._id, passwordLength: user.password?.length });
+      return res.status(500).json({
+        error: 'Account security issue. Please contact support.'
+      });
+    }
+
     // Check password
     const isPasswordValid = await user.comparePassword(password);
 
     if (!isPasswordValid) {
+      console.log('Login failed: Invalid password for user:', user._id);
       return res.status(401).json({
         error: 'Invalid email or password'
       });
     }
+
+    console.log('Login successful for user:', user._id);
 
     // Update online status
     user.isOnline = true;
