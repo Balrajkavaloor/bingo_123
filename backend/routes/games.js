@@ -1,466 +1,744 @@
 const express = require('express');
+const router = express.Router();
 const Game = require('../models/Game');
 const User = require('../models/User');
 const Score = require('../models/Score');
-const router = express.Router();
+const { authenticateToken: auth } = require('../middleware/auth');
 
-// Generate Bingo board
-const generateBingoBoard = () => {
-  const board = [];
-  
-  // Generate numbers 1-25 (excluding 13 for FREE space)
-  const allNumbers = [];
-  for (let i = 1; i <= 25; i++) {
-    if (i !== 13) { // Skip 13 for FREE space
-      allNumbers.push(i);
-    }
-  }
-  
-  // Shuffle the numbers
-  for (let i = allNumbers.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [allNumbers[i], allNumbers[j]] = [allNumbers[j], allNumbers[i]];
-  }
-  
-  // Generate 5x5 board
-  let numberIndex = 0;
-  for (let i = 0; i < 5; i++) {
-    const row = [];
-    for (let j = 0; j < 5; j++) {
-      if (i === 2 && j === 2) {
-        row.push('FREE'); // Center space
-      } else {
-        row.push(allNumbers[numberIndex++]);
-      }
-    }
-    board.push(row);
-  }
-  return board;
-};
-
-// Create a new game
-router.post('/', async (req, res) => {
+// Get all public rooms
+router.get('/rooms', async (req, res) => {
   try {
-    const { opponentId, gameType = 'multiplayer' } = req.body;
-
-    if (gameType === 'multiplayer' && !opponentId) {
-      return res.status(400).json({
-        error: 'Opponent ID is required for multiplayer games'
-      });
-    }
-
-    // Check if opponent exists
-    if (opponentId) {
-      const opponent = await User.findById(opponentId);
-      if (!opponent) {
-        return res.status(404).json({
-          error: 'Opponent not found'
-        });
-      }
-
-      // Check if there's already an active game between these users
-      const existingGame = await Game.findOne({
-        $or: [
-          { creator: req.user._id, opponent: opponentId },
-          { creator: opponentId, opponent: req.user._id }
-        ],
-        status: { $in: ['pending', 'active'] }
-      });
-
-      if (existingGame) {
-        return res.status(400).json({
-          error: 'There is already an active game with this opponent'
-        });
-      }
-    }
-
-    // Generate shared board for both players
-    const sharedBoard = generateBingoBoard();
-
-    const gameData = {
-      creator: req.user._id,
-      opponent: opponentId || req.user._id, // For solo games, opponent is the same as creator
-      gameType,
-      gameData: {
-        creatorBoard: sharedBoard,
-        opponentBoard: sharedBoard,
-        calledNumbers: [],
-        currentTurn: 'creator',
-        creatorCompletedLines: 0,
-        opponentCompletedLines: 0
-      }
-    };
-
-    const game = new Game(gameData);
-    await game.save();
-
-    // Populate user details
-    await game.populate([
-      { path: 'creator', select: 'username avatar' },
-      { path: 'opponent', select: 'username avatar' }
-    ]);
-
-    res.status(201).json({
-      message: 'Game created successfully',
-      game
-    });
-
-  } catch (error) {
-    console.error('Create game error:', error);
-    res.status(500).json({
-      error: 'Internal server error'
-    });
-  }
-});
-
-// Get all games for current user
-router.get('/', async (req, res) => {
-  try {
-    const { status, page = 1, limit = 10 } = req.query;
-
-    const query = {
-      $or: [
-        { creator: req.user._id },
-        { opponent: req.user._id }
-      ]
-    };
-
-    if (status) {
-      query.status = status;
-    }
-
-    const games = await Game.find(query)
-      .populate('creator', 'username avatar')
-      .populate('opponent', 'username avatar')
-      .populate('winner', 'username')
-      .sort({ createdAt: -1 })
-      .limit(limit * 1)
-      .skip((page - 1) * limit)
-      .lean();
-
-    const total = await Game.countDocuments(query);
+    const rooms = await Game.find({ 
+      status: 'waiting', 
+      gameType: 'public' 
+    })
+    .populate('creator', 'username')
+    .populate('players.user', 'username')
+    .select('roomCode roomName creator players maxPlayers status createdAt')
+    .sort({ createdAt: -1 })
+    .limit(20);
 
     res.json({
-      games,
-      totalPages: Math.ceil(total / limit),
-      currentPage: page,
-      total
+      success: true,
+      rooms: rooms.map(room => ({
+        ...room.toObject(),
+        playerCount: room.players.length,
+        isFull: room.players.length >= room.maxPlayers
+      }))
     });
-
   } catch (error) {
-    console.error('Get games error:', error);
+    console.error('Get rooms error:', error);
     res.status(500).json({
-      error: 'Internal server error'
+      success: false,
+      error: 'Failed to fetch rooms'
     });
   }
 });
 
-// Get specific game
-router.get('/:gameId', async (req, res) => {
+// Create a new room
+router.post('/rooms', auth, async (req, res) => {
   try {
-    const { gameId } = req.params;
+    const { roomName, maxPlayers = 4, gameType = 'public', password = null, gameSettings = {} } = req.body;
 
-    const game = await Game.findById(gameId)
-      .populate('creator', 'username avatar')
-      .populate('opponent', 'username avatar')
-      .populate('winner', 'username');
-
-    if (!game) {
-      return res.status(404).json({
-        error: 'Game not found'
-      });
-    }
-
-    // Check if user is part of this game
-    if (game.creator._id.toString() !== req.user._id.toString() && 
-        game.opponent._id.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        error: 'Access denied. You are not part of this game.'
-      });
-    }
-
-    res.json({ game });
-
-  } catch (error) {
-    console.error('Get game error:', error);
-    res.status(500).json({
-      error: 'Internal server error'
-    });
-  }
-});
-
-// Join a game (accept invitation)
-router.post('/:gameId/join', async (req, res) => {
-  try {
-    const { gameId } = req.params;
-
-    const game = await Game.findById(gameId);
-
-    if (!game) {
-      return res.status(404).json({
-        error: 'Game not found'
-      });
-    }
-
-    if (!game.canJoin(req.user._id)) {
+    if (!roomName || roomName.trim().length < 3) {
       return res.status(400).json({
-        error: 'Cannot join this game'
+        success: false,
+        error: 'Room name must be at least 3 characters long'
+      });
+    }
+
+    if (maxPlayers < 2 || maxPlayers > 8) {
+      return res.status(400).json({
+        success: false,
+        error: 'Max players must be between 2 and 8'
+      });
+    }
+
+    const game = new Game({
+      roomName: roomName.trim(),
+      creator: req.user._id,
+      maxPlayers,
+      gameType,
+      password: password || null,
+      gameSettings: {
+        winPattern: gameSettings.winPattern || 'line',
+        autoStart: gameSettings.autoStart || false,
+        countdownDuration: gameSettings.countdownDuration || 10,
+        ...gameSettings
+      }
+    });
+
+    // Add creator as first player
+    await game.addPlayer(req.user._id, req.user.username);
+
+    await game.save();
+
+    // Emit room created event
+    if (req.io) {
+      req.io.emit('roomCreated', {
+        room: {
+          ...game.toObject(),
+          playerCount: game.players.length,
+          isFull: game.players.length >= game.maxPlayers
+        }
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      room: {
+        ...game.toObject(),
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      }
+    });
+
+  } catch (error) {
+    console.error('Create room error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to create room'
+    });
+  }
+});
+
+// Join a room
+router.post('/rooms/:roomCode/join', auth, async (req, res) => {
+  try {
+    const { roomCode } = req.params;
+    const { password } = req.body;
+
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() })
+      .populate('creator', 'username')
+      .populate('players.user', 'username');
+
+    if (!game) {
+      return res.status(404).json({
+        success: false,
+        error: 'Room not found'
+      });
+    }
+
+    if (game.status !== 'waiting') {
+      return res.status(400).json({
+        success: false,
+        error: 'Room is not accepting players'
+      });
+    }
+
+    if (game.players.length >= game.maxPlayers) {
+      return res.status(400).json({
+        success: false,
+        error: 'Room is full'
+      });
+    }
+
+    if (game.gameType === 'private' && game.password && game.password !== password) {
+      return res.status(401).json({
+        success: false,
+        error: 'Incorrect password'
+      });
+    }
+
+    if (game.players.some(p => p.user.toString() === req.user._id.toString())) {
+      return res.status(400).json({
+        success: false,
+        error: 'You are already in this room'
+      });
+    }
+
+    // Add player to room
+    await game.addPlayer(req.user._id, req.user.username);
+
+    // Emit player joined event
+    if (req.io) {
+      req.io.to(roomCode).emit('playerJoined', {
+        roomCode,
+        player: {
+          user: req.user._id,
+          username: req.user.username,
+          isReady: false,
+          isHost: false
+        },
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      });
+    }
+
+    res.json({
+      success: true,
+      room: {
+        ...game.toObject(),
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      }
+    });
+
+  } catch (error) {
+    console.error('Join room error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to join room'
+    });
+  }
+});
+
+// Leave a room
+router.post('/rooms/:roomCode/leave', auth, async (req, res) => {
+  try {
+    const { roomCode } = req.params;
+
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() });
+
+    if (!game) {
+      return res.status(404).json({
+        success: false,
+        error: 'Room not found'
+      });
+    }
+
+    if (!game.players.some(p => p.user.toString() === req.user._id.toString())) {
+      return res.status(400).json({
+        success: false,
+        error: 'You are not in this room'
+      });
+    }
+
+    // Remove player from room
+    await game.removePlayer(req.user._id);
+
+    // Emit player left event
+    if (req.io) {
+      req.io.to(roomCode).emit('playerLeft', {
+        roomCode,
+        userId: req.user._id,
+        username: req.user.username,
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Left room successfully'
+    });
+
+  } catch (error) {
+    console.error('Leave room error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to leave room'
+    });
+  }
+});
+
+// Set player ready status
+router.post('/rooms/:roomCode/ready', auth, async (req, res) => {
+  try {
+    const { roomCode } = req.params;
+    const { isReady } = req.body;
+
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() });
+
+    if (!game) {
+      return res.status(404).json({
+        success: false,
+        error: 'Room not found'
+      });
+    }
+
+    if (!game.players.some(p => p.user.toString() === req.user._id.toString())) {
+      return res.status(400).json({
+        success: false,
+        error: 'You are not in this room'
+      });
+    }
+
+    // Set player ready status
+    await game.setPlayerReady(req.user._id, isReady);
+
+    // Emit player ready status changed
+    if (req.io) {
+      req.io.to(roomCode).emit('playerReadyStatusChanged', {
+        roomCode,
+        userId: req.user._id,
+        isReady,
+        allPlayersReady: game.allPlayersReady()
+      });
+    }
+
+    res.json({
+      success: true,
+      isReady,
+      allPlayersReady: game.allPlayersReady()
+    });
+
+  } catch (error) {
+    console.error('Set ready status error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to set ready status'
+    });
+  }
+});
+
+// Start game (host only)
+router.post('/rooms/:roomCode/start', auth, async (req, res) => {
+  try {
+    const { roomCode } = req.params;
+
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() });
+
+    if (!game) {
+      return res.status(404).json({
+        success: false,
+        error: 'Room not found'
+      });
+    }
+
+    const player = game.players.find(p => p.user.toString() === req.user._id.toString());
+    if (!player || !player.isHost) {
+      return res.status(403).json({
+        success: false,
+        error: 'Only the host can start the game'
+      });
+    }
+
+    if (!game.allPlayersReady()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Not all players are ready'
       });
     }
 
     // Start the game
-    game.status = 'active';
-    game.invitationAccepted = true;
-    game.startedAt = new Date();
-    await game.save();
+    await game.startGame();
 
-    await game.populate([
-      { path: 'creator', select: 'username avatar' },
-      { path: 'opponent', select: 'username avatar' }
-    ]);
+    // Emit game started event
+    if (req.io) {
+      req.io.to(roomCode).emit('gameStarted', {
+        roomCode,
+        game: game.toObject()
+      });
+    }
 
     res.json({
-      message: 'Game started successfully',
-      game
+      success: true,
+      game: game.toObject()
     });
 
   } catch (error) {
-    console.error('Join game error:', error);
+    console.error('Start game error:', error);
     res.status(500).json({
-      error: 'Internal server error'
+      success: false,
+      error: 'Failed to start game'
     });
   }
 });
 
-// Call a number in the game
-router.post('/:gameId/call-number', async (req, res) => {
+// Get room details
+router.get('/rooms/:roomCode', async (req, res) => {
   try {
-    const { gameId } = req.params;
-    const { number } = req.body;
+    const { roomCode } = req.params;
 
-    const game = await Game.findById(gameId);
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() })
+      .populate('creator', 'username')
+      .populate('players.user', 'username');
 
     if (!game) {
       return res.status(404).json({
-        error: 'Game not found'
+        success: false,
+        error: 'Room not found'
+      });
+    }
+
+    res.json({
+      success: true,
+      room: {
+        ...game.toObject(),
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      }
+    });
+
+  } catch (error) {
+    console.error('Get room error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch room'
+    });
+  }
+});
+
+// Get user's active games
+router.get('/my-games', auth, async (req, res) => {
+  try {
+    const games = await Game.find({
+      'players.user': req.user._id,
+      status: { $in: ['waiting', 'starting', 'active'] }
+    })
+    .populate('creator', 'username')
+    .populate('players.user', 'username')
+    .sort({ updatedAt: -1 });
+
+    res.json({
+      success: true,
+      games: games.map(game => ({
+        ...game.toObject(),
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      }))
+    });
+
+  } catch (error) {
+    console.error('Get my games error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch games'
+    });
+  }
+});
+
+// Get all games (for admin)
+router.get('/', auth, async (req, res) => {
+  try {
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({
+        success: false,
+        error: 'Access denied'
+      });
+    }
+
+    const games = await Game.find()
+      .populate('creator', 'username')
+      .populate('players.user', 'username')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      games: games.map(game => ({
+        ...game.toObject(),
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      }))
+    });
+
+  } catch (error) {
+    console.error('Get all games error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to fetch games'
+    });
+  }
+});
+
+// Call a number (during active game)
+router.post('/rooms/:roomCode/call-number', auth, async (req, res) => {
+  try {
+    const { roomCode } = req.params;
+    const { number } = req.body;
+
+    if (!number || number < 1 || number > 75) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid number (must be 1-75)'
+      });
+    }
+
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() });
+
+    if (!game) {
+      return res.status(404).json({
+        success: false,
+        error: 'Room not found'
       });
     }
 
     if (game.status !== 'active') {
       return res.status(400).json({
+        success: false,
         error: 'Game is not active'
       });
     }
 
-    if (!game.isUserTurn(req.user._id)) {
+    if (!game.players.some(p => p.user.toString() === req.user._id.toString())) {
       return res.status(400).json({
-        error: 'It is not your turn'
+        success: false,
+        error: 'You are not in this game'
       });
     }
 
-    // Validate number
-    if (typeof number !== 'number' || number < 1 || number > 25) {
+    // Check if number already called
+    if (game.calledNumbers.some(cn => cn.number === number)) {
       return res.status(400).json({
-        error: 'Invalid number. Must be between 1 and 25.'
+        success: false,
+        error: 'Number already called'
       });
     }
 
-    // Call the number
-    const numberCalled = game.callNumber(number, req.user._id);
-    
-    if (!numberCalled) {
-      return res.status(400).json({
-        error: 'Number has already been called'
-      });
-    }
-
-    // Update completed lines for both players
-    const creatorLines = game.checkWinCondition(game.gameData.creatorBoard, game.gameData.calledNumbers) ? 5 : 0;
-    const opponentLines = game.checkWinCondition(game.gameData.opponentBoard, game.gameData.calledNumbers) ? 5 : 0;
-
-    game.gameData.creatorCompletedLines = creatorLines;
-    game.gameData.opponentCompletedLines = opponentLines;
-
-    // Check for winner
-    let winner = null;
-    if (creatorLines >= 5) {
-      winner = game.creator;
-    } else if (opponentLines >= 5) {
-      winner = game.opponent;
-    }
-
-    if (winner) {
-      game.endGame(winner);
-      
-      // Update user statistics
-      const creatorUser = await User.findById(game.creator);
-      const opponentUser = await User.findById(game.opponent);
-      
-      if (creatorUser && opponentUser) {
-        creatorUser.updateGameStats(winner.toString() === creatorUser._id.toString(), creatorLines);
-        opponentUser.updateGameStats(winner.toString() === opponentUser._id.toString(), opponentLines);
-        
-        await creatorUser.save();
-        await opponentUser.save();
-      }
-
-      // Create score records
-      const creatorScore = new Score({
-        user: game.creator,
-        game: game._id,
-        isWinner: winner.toString() === game.creator.toString(),
-        linesCompleted: creatorLines,
-        gameType: game.gameType,
-        opponent: game.opponent,
-        gameDuration: game.duration,
-        numbersCalled: game.gameData.calledNumbers.length
-      });
-
-      const opponentScore = new Score({
-        user: game.opponent,
-        game: game._id,
-        isWinner: winner.toString() === game.opponent.toString(),
-        linesCompleted: opponentLines,
-        gameType: game.gameType,
-        opponent: game.creator,
-        gameDuration: game.duration,
-        numbersCalled: game.gameData.calledNumbers.length
-      });
-
-      await creatorScore.save();
-      await opponentScore.save();
-
-      // Emit real-time game completion event
-      if (req.io) {
-        req.io.emit('gameCompleted', {
-          gameId: game._id,
-          winner: winner.toString(),
-          creatorStats: {
-            userId: creatorUser._id,
-            gamesPlayed: creatorUser.gamesPlayed,
-            gamesWon: creatorUser.gamesWon,
-            gamesLost: creatorUser.gamesLost,
-            totalLinesCompleted: creatorUser.totalLinesCompleted,
-            averageLinesPerGame: creatorUser.averageLinesPerGame,
-            achievementLevel: creatorUser.achievementLevel,
-            winRate: creatorUser.winRate
-          },
-          opponentStats: {
-            userId: opponentUser._id,
-            gamesPlayed: opponentUser.gamesPlayed,
-            gamesWon: opponentUser.gamesWon,
-            gamesLost: opponentUser.gamesLost,
-            totalLinesCompleted: opponentUser.totalLinesCompleted,
-            averageLinesPerGame: opponentUser.averageLinesPerGame,
-            achievementLevel: opponentUser.achievementLevel,
-            winRate: opponentUser.winRate
-          }
-        });
-      }
-    }
+    // Add called number
+    game.calledNumbers.push({
+      number,
+      calledBy: req.user._id,
+      calledAt: new Date()
+    });
 
     await game.save();
 
-    await game.populate([
-      { path: 'creator', select: 'username avatar' },
-      { path: 'opponent', select: 'username avatar' },
-      { path: 'winner', select: 'username' }
-    ]);
+    // Emit number called event
+    if (req.io) {
+      req.io.to(roomCode).emit('numberCalled', {
+        roomCode,
+        number,
+        calledBy: req.user._id,
+        calledAt: new Date()
+      });
+    }
 
     res.json({
-      message: 'Number called successfully',
-      game,
-      winner: winner ? { _id: winner, username: game.creator._id.toString() === winner.toString() ? game.creator.username : game.opponent.username } : null
+      success: true,
+      calledNumber: {
+        number,
+        calledBy: req.user._id,
+        calledAt: new Date()
+      }
     });
 
   } catch (error) {
     console.error('Call number error:', error);
     res.status(500).json({
-      error: 'Internal server error'
+      success: false,
+      error: 'Failed to call number'
     });
   }
 });
 
-// Decline game invitation
-router.post('/:gameId/decline', async (req, res) => {
+// Check for winner
+router.post('/rooms/:roomCode/check-win', auth, async (req, res) => {
   try {
-    const { gameId } = req.params;
+    const { roomCode } = req.params;
+    const { board } = req.body;
 
-    const game = await Game.findById(gameId);
+    if (!board || !Array.isArray(board)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid board data'
+      });
+    }
+
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() });
 
     if (!game) {
       return res.status(404).json({
-        error: 'Game not found'
+        success: false,
+        error: 'Room not found'
       });
     }
 
-    if (game.opponent.toString() !== req.user._id.toString()) {
-      return res.status(403).json({
-        error: 'You can only decline games where you are the opponent'
-      });
-    }
-
-    if (game.status !== 'pending') {
+    if (game.status !== 'active') {
       return res.status(400).json({
-        error: 'Game is not pending'
+        success: false,
+        error: 'Game is not active'
       });
     }
 
-    game.status = 'cancelled';
-    await game.save();
+    if (!game.players.some(p => p.user.toString() === req.user._id.toString())) {
+      return res.status(400).json({
+        success: false,
+        error: 'You are not in this game'
+      });
+    }
 
-    res.json({
-      message: 'Game invitation declined',
-      game
-    });
+    // Check win condition based on game settings
+    const isWinner = checkWinCondition(board, game.calledNumbers.map(cn => cn.number), game.gameSettings.winPattern);
+
+    if (isWinner) {
+      // End the game
+      game.status = 'completed';
+      game.winner = req.user._id;
+      game.completedAt = new Date();
+      await game.save();
+
+      // Update user stats
+      const winner = await User.findById(req.user._id);
+      const opponent = game.players.find(p => p.user.toString() !== req.user._id.toString());
+      
+      if (winner && opponent) {
+        await winner.updateGameStats(true, 5); // Assuming 5 lines completed for win
+        
+        // Create score records
+        const winnerScore = new Score({
+          user: winner._id,
+          game: game._id,
+          score: 100,
+          linesCompleted: 5,
+          isWinner: true
+        });
+        
+        const opponentScore = new Score({
+          user: opponent.user,
+          game: game._id,
+          score: 50,
+          linesCompleted: 3,
+          isWinner: false
+        });
+        
+        await winnerScore.save();
+        await opponentScore.save();
+
+        // Emit game completed event
+        if (req.io) {
+          req.io.to(roomCode).emit('gameCompleted', {
+            roomCode,
+            winner: req.user._id,
+            winnerUsername: req.user.username,
+            game: game.toObject()
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        isWinner: true,
+        game: game.toObject()
+      });
+    } else {
+      res.json({
+        success: true,
+        isWinner: false
+      });
+    }
 
   } catch (error) {
-    console.error('Decline game error:', error);
+    console.error('Check win error:', error);
     res.status(500).json({
-      error: 'Internal server error'
+      success: false,
+      error: 'Failed to check win condition'
     });
   }
 });
 
-// Cancel a game
-router.post('/:gameId/cancel', async (req, res) => {
+// Update room settings (host only)
+router.put('/rooms/:roomCode/settings', auth, async (req, res) => {
   try {
-    const { gameId } = req.params;
+    const { roomCode } = req.params;
+    const { maxPlayers, gameSettings } = req.body;
 
-    const game = await Game.findById(gameId);
+    const game = await Game.findOne({ roomCode: roomCode.toUpperCase() });
 
     if (!game) {
       return res.status(404).json({
-        error: 'Game not found'
+        success: false,
+        error: 'Room not found'
       });
     }
 
-    if (game.creator.toString() !== req.user._id.toString()) {
+    const player = game.players.find(p => p.user.toString() === req.user._id.toString());
+    if (!player || !player.isHost) {
       return res.status(403).json({
-        error: 'Only the creator can cancel a game'
+        success: false,
+        error: 'Only the host can update room settings'
       });
     }
 
-    if (game.status === 'completed') {
-      return res.status(400).json({
-        error: 'Cannot cancel a completed game'
-      });
+    // Update game settings
+    if (maxPlayers && maxPlayers >= game.players.length && maxPlayers <= 8) {
+      game.maxPlayers = maxPlayers;
     }
 
-    game.status = 'cancelled';
+    if (gameSettings) {
+      game.gameSettings = { ...game.gameSettings, ...gameSettings };
+    }
+
     await game.save();
 
+    // Emit settings updated to all players
+    if (req.io) {
+      req.io.to(roomCode).emit('roomSettingsUpdated', {
+        roomCode,
+        settings: game.gameSettings,
+        maxPlayers: game.maxPlayers,
+        updatedBy: req.user.username
+      });
+    }
+
     res.json({
-      message: 'Game cancelled successfully',
-      game
+      success: true,
+      room: {
+        ...game.toObject(),
+        playerCount: game.players.length,
+        isFull: game.players.length >= game.maxPlayers
+      }
     });
 
   } catch (error) {
-    console.error('Cancel game error:', error);
+    console.error('Update room settings error:', error);
     res.status(500).json({
-      error: 'Internal server error'
+      success: false,
+      error: 'Failed to update room settings'
     });
   }
 });
+
+// Helper function to check win condition
+function checkWinCondition(board, calledNumbers, winPattern) {
+  switch (winPattern) {
+    case 'line':
+      return checkLineWin(board, calledNumbers);
+    case 'full':
+      return checkFullWin(board, calledNumbers);
+    case 'corners':
+      return checkCornersWin(board, calledNumbers);
+    case 'diagonal':
+      return checkDiagonalWin(board, calledNumbers);
+    default:
+      return checkLineWin(board, calledNumbers);
+  }
+}
+
+function checkLineWin(board, calledNumbers) {
+  // Check rows
+  for (let i = 0; i < 5; i++) {
+    if (board[i].every(num => calledNumbers.includes(num))) {
+      return true;
+    }
+  }
+  
+  // Check columns
+  for (let j = 0; j < 5; j++) {
+    if (board.every(row => calledNumbers.includes(row[j]))) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+function checkFullWin(board, calledNumbers) {
+  return board.every(row => 
+    row.every(num => calledNumbers.includes(num))
+  );
+}
+
+function checkCornersWin(board, calledNumbers) {
+  const corners = [
+    board[0][0], board[0][4], 
+    board[4][0], board[4][4]
+  ];
+  return corners.every(num => calledNumbers.includes(num));
+}
+
+function checkDiagonalWin(board, calledNumbers) {
+  // Main diagonal
+  const mainDiagonal = [board[0][0], board[1][1], board[2][2], board[3][3], board[4][4]];
+  if (mainDiagonal.every(num => calledNumbers.includes(num))) {
+    return true;
+  }
+  
+  // Anti-diagonal
+  const antiDiagonal = [board[0][4], board[1][3], board[2][2], board[3][1], board[4][0]];
+  return antiDiagonal.every(num => calledNumbers.includes(num));
+}
 
 module.exports = router;
