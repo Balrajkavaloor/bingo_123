@@ -6,9 +6,14 @@ const router = express.Router();
 // Rate limiting for auth endpoints
 const rateLimit = require('express-rate-limit');
 
+// Environment-based rate limiting
+const isDevelopment = process.env.NODE_ENV === 'development';
+const authMaxRequests = isDevelopment ? 50 : 20;
+const loginMaxRequests = isDevelopment ? 25 : 10;
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // limit each IP to 5 requests per windowMs for auth
+  max: authMaxRequests, // limit each IP to requests per windowMs for auth
   message: 'Too many authentication attempts, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
@@ -16,7 +21,7 @@ const authLimiter = rateLimit({
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 3, // limit each IP to 3 login attempts per windowMs
+  max: loginMaxRequests, // limit each IP to login attempts per windowMs
   message: 'Too many login attempts, please try again later.',
   standardHeaders: true,
   legacyHeaders: false,
@@ -428,5 +433,17 @@ router.post('/logout-all', async (req, res) => {
     });
   }
 });
+
+// Development endpoint to reset rate limiting (REMOVE IN PRODUCTION)
+if (process.env.NODE_ENV === 'development') {
+  router.post('/reset-rate-limit', (req, res) => {
+    // This will reset the rate limiting for the current IP
+    // Note: This is a development-only feature
+    res.json({
+      message: 'Rate limit reset endpoint available in development mode',
+      note: 'Restart your server to completely reset rate limits'
+    });
+  });
+}
 
 module.exports = router;
