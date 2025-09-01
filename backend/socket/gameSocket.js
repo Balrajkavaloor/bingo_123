@@ -2,6 +2,28 @@ const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const Game = require('../models/Game');
 
+// Store active rooms in memory (no database needed)
+const activeRooms = new Map();
+
+// Generate unique 6-character room codes (A-Z, 0-9, excluding ambiguous characters)
+const generateRoomCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Excluded: O, 0, I, 1
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+};
+
+// Ensure room code uniqueness
+const getUniqueRoomCode = () => {
+  let code;
+  do {
+    code = generateRoomCode();
+  } while (activeRooms.has(code));
+  return code;
+};
+
 const setupSocketIO = (io) => {
   // Middleware to authenticate socket connections
   io.use(async (socket, next) => {
@@ -97,9 +119,146 @@ const setupSocketIO = (io) => {
           username: socket.user.username,
           timestamp: new Date()
         });
-
       } catch (error) {
         console.error('Error leaving room:', error);
+        socket.emit('error', { message: 'Failed to leave room' });
+      }
+    });
+
+    // Handle room creation (new multiplayer system)
+    socket.on('createRoom', async (data) => {
+      try {
+        const { userId, username } = data;
+        
+        // Generate unique room code
+        const roomCode = getUniqueRoomCode();
+        
+        // Create room object
+        const room = {
+          roomCode,
+          players: [{
+            userId: socket.user._id,
+            username: socket.user.username,
+            isHost: true
+          }],
+          status: 'waiting',
+          createdAt: new Date(),
+          maxPlayers: 2
+        };
+        
+        // Store room
+        activeRooms.set(roomCode, room);
+        
+        // Join socket to room
+        socket.join(`room_${roomCode}`);
+        
+        // Emit room created event
+        socket.emit('roomCreated', { roomCode });
+        
+        console.log(`Room created: ${roomCode} by ${socket.user.username}`);
+        
+      } catch (error) {
+        console.error('Create room error:', error);
+        socket.emit('error', { message: 'Failed to create room' });
+      }
+    });
+
+    // Handle room joining (new multiplayer system)
+    socket.on('joinRoom', async (data) => {
+      try {
+        const { roomCode, userId, username } = data;
+        
+        // Check if room exists
+        if (!activeRooms.has(roomCode)) {
+          socket.emit('error', { message: 'Room not found' });
+          return;
+        }
+        
+        const room = activeRooms.get(roomCode);
+        
+        // Check if room is full
+        if (room.players.length >= room.maxPlayers) {
+          socket.emit('error', { message: 'Room is full' });
+          return;
+        }
+        
+        // Check if user is already in the room
+        if (room.players.some(p => p.userId === socket.user._id)) {
+          socket.emit('error', { message: 'You are already in this room' });
+          return;
+        }
+        
+        // Add player to room
+        room.players.push({
+          userId: socket.user._id,
+          username: socket.user.username,
+          isHost: false
+        });
+        
+        // Join socket to room
+        socket.join(`room_${roomCode}`);
+        
+        // Emit room joined event to the joining player
+        socket.emit('roomJoined', {
+          roomCode,
+          players: room.players,
+          status: room.status
+        });
+        
+        // Notify other players in the room
+        socket.to(`room_${roomCode}`).emit('playerJoined', {
+          roomCode,
+          players: room.players,
+          username: socket.user.username
+        });
+        
+        console.log(`Player ${socket.user.username} joined room ${roomCode}`);
+        
+      } catch (error) {
+        console.error('Join room error:', error);
+        socket.emit('error', { message: 'Failed to join room' });
+      }
+    });
+
+    // Handle starting game (new multiplayer system)
+    socket.on('startGame', async (data) => {
+      try {
+        const { roomCode } = data;
+        
+        if (!activeRooms.has(roomCode)) {
+          socket.emit('error', { message: 'Room not found' });
+          return;
+        }
+        
+        const room = activeRooms.get(roomCode);
+        
+        // Check if user is host
+        const player = room.players.find(p => p.userId === socket.user._id);
+        if (!player || !player.isHost) {
+          socket.emit('error', { message: 'Only the host can start the game' });
+          return;
+        }
+        
+        // Check if enough players
+        if (room.players.length < 2) {
+          socket.emit('error', { message: 'Need at least 2 players to start' });
+          return;
+        }
+        
+        // Update room status
+        room.status = 'starting';
+        
+        // Notify all players in the room
+        io.to(`room_${roomCode}`).emit('gameStarted', {
+          roomCode,
+          players: room.players
+        });
+        
+        console.log(`Game started in room ${roomCode}`);
+        
+      } catch (error) {
+        console.error('Start game error:', error);
+        socket.emit('error', { message: 'Failed to start game' });
       }
     });
 
@@ -392,6 +551,35 @@ const setupSocketIO = (io) => {
     // Handle disconnection
     socket.on('disconnect', () => {
       console.log(`User ${socket.user.username} disconnected: ${socket.id}`);
+      
+      // Clean up rooms for disconnected user
+      for (const [roomCode, room] of activeRooms.entries()) {
+        const playerIndex = room.players.findIndex(p => p.userId === socket.user._id);
+        if (playerIndex !== -1) {
+          const leavingPlayer = room.players[playerIndex];
+          room.players.splice(playerIndex, 1);
+          
+          // If room is empty, delete it
+          if (room.players.length === 0) {
+            activeRooms.delete(roomCode);
+            console.log(`Room ${roomCode} deleted (user disconnected)`);
+          } else {
+            // If host left, assign new host
+            if (leavingPlayer.isHost && room.players.length > 0) {
+              room.players[0].isHost = true;
+            }
+            
+            // Notify remaining players
+            io.to(`room_${roomCode}`).emit('playerLeft', {
+              roomCode,
+              players: room.players,
+              username: leavingPlayer.username
+            });
+          }
+          
+          console.log(`Player ${leavingPlayer.username} disconnected from room ${roomCode}`);
+        }
+      }
       
       // Leave all rooms
       socket.rooms.forEach(room => {
